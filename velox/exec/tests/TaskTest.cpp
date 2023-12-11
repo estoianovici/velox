@@ -21,167 +21,21 @@
 #include "velox/common/testutil/TestValue.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
-#include "velox/exec/PartitionedOutputBufferManager.h"
+#include "velox/exec/OutputBufferManager.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/Values.h"
+#include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/Cursor.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/exec/tests/utils/QueryAssertions.h"
+#include "velox/exec/tests/utils/TempDirectoryPath.h"
 
 using namespace facebook::velox;
 using namespace facebook::velox::common::testutil;
 
 namespace facebook::velox::exec::test {
-
-class TaskTest : public HiveConnectorTestBase {
- protected:
-  static std::pair<std::shared_ptr<exec::Task>, std::vector<RowVectorPtr>>
-  executeSingleThreaded(
-      core::PlanFragment plan,
-      const std::unordered_map<std::string, std::vector<std::string>>&
-          filePaths = {}) {
-    auto task = Task::create(
-        "single.execution.task.0", plan, 0, std::make_shared<core::QueryCtx>());
-
-    for (const auto& [nodeId, paths] : filePaths) {
-      for (const auto& path : paths) {
-        task->addSplit(nodeId, exec::Split(makeHiveConnectorSplit(path)));
-      }
-      task->noMoreSplits(nodeId);
-    }
-
-    VELOX_CHECK(task->supportsSingleThreadedExecution());
-
-    vector_size_t numRows = 0;
-    std::vector<RowVectorPtr> results;
-    for (;;) {
-      auto result = task->next();
-      if (!result) {
-        break;
-      }
-
-      for (auto& child : result->children()) {
-        child->loadedVector();
-      }
-      results.push_back(result);
-      numRows += result->size();
-    }
-
-    VELOX_CHECK(waitForTaskCompletion(task.get()));
-
-    auto planNodeStats = toPlanStats(task->taskStats());
-    VELOX_CHECK(planNodeStats.count(plan.planNode->id()));
-    VELOX_CHECK_EQ(numRows, planNodeStats.at(plan.planNode->id()).outputRows);
-    VELOX_CHECK_EQ(
-        results.size(), planNodeStats.at(plan.planNode->id()).outputVectors);
-
-    return {task, results};
-  }
-};
-
-TEST_F(TaskTest, wrongPlanNodeForSplit) {
-  auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
-      "test",
-      "file:/tmp/abc",
-      facebook::velox::dwio::common::FileFormat::DWRF,
-      0,
-      100);
-
-  auto plan = PlanBuilder()
-                  .tableScan(ROW({"a", "b"}, {INTEGER(), DOUBLE()}))
-                  .project({"a * a", "b + b"})
-                  .planFragment();
-
-  auto task = Task::create(
-      "task-1",
-      std::move(plan),
-      0,
-      std::make_shared<core::QueryCtx>(driverExecutor_.get()));
-
-  // Add split for the source node.
-  task->addSplit("0", exec::Split(folly::copy(connectorSplit)));
-
-  // Add an empty split.
-  task->addSplit("0", exec::Split());
-
-  // Try to add split for a non-source node.
-  auto errorMessage =
-      "Splits can be associated only with leaf plan nodes which require splits. Plan node ID 1 doesn't refer to such plan node.";
-  VELOX_ASSERT_THROW(
-      task->addSplit("1", exec::Split(folly::copy(connectorSplit))),
-      errorMessage)
-
-  VELOX_ASSERT_THROW(
-      task->addSplitWithSequence(
-          "1", exec::Split(folly::copy(connectorSplit)), 3),
-      errorMessage)
-
-  VELOX_ASSERT_THROW(task->setMaxSplitSequenceId("1", 9), errorMessage)
-
-  VELOX_ASSERT_THROW(task->noMoreSplits("1"), errorMessage)
-
-  VELOX_ASSERT_THROW(task->noMoreSplitsForGroup("1", 5), errorMessage)
-
-  // Try to add split for non-existent node.
-  errorMessage =
-      "Splits can be associated only with leaf plan nodes which require splits. Plan node ID 12 doesn't refer to such plan node.";
-  VELOX_ASSERT_THROW(
-      task->addSplit("12", exec::Split(folly::copy(connectorSplit))),
-      errorMessage)
-
-  VELOX_ASSERT_THROW(
-      task->addSplitWithSequence(
-          "12", exec::Split(folly::copy(connectorSplit)), 3),
-      errorMessage)
-
-  VELOX_ASSERT_THROW(task->setMaxSplitSequenceId("12", 9), errorMessage)
-
-  VELOX_ASSERT_THROW(task->noMoreSplits("12"), errorMessage)
-
-  VELOX_ASSERT_THROW(task->noMoreSplitsForGroup("12", 5), errorMessage)
-
-  // Try to add split for a Values source node.
-  plan =
-      PlanBuilder()
-          .values({makeRowVector(ROW({"a", "b"}, {INTEGER(), DOUBLE()}), 10)})
-          .project({"a * a", "b + b"})
-          .planFragment();
-
-  auto valuesTask = Task::create(
-      "task-2",
-      std::move(plan),
-      0,
-      std::make_shared<core::QueryCtx>(driverExecutor_.get()));
-  errorMessage =
-      "Splits can be associated only with leaf plan nodes which require splits. Plan node ID 0 doesn't refer to such plan node.";
-  VELOX_ASSERT_THROW(
-      valuesTask->addSplit("0", exec::Split(folly::copy(connectorSplit))),
-      errorMessage)
-}
-
-TEST_F(TaskTest, duplicatePlanNodeIds) {
-  auto plan = PlanBuilder()
-                  .tableScan(ROW({"a", "b"}, {INTEGER(), DOUBLE()}))
-                  .hashJoin(
-                      {"a"},
-                      {"a1"},
-                      PlanBuilder()
-                          .tableScan(ROW({"a1", "b1"}, {INTEGER(), DOUBLE()}))
-                          .planNode(),
-                      "",
-                      {"b", "b1"})
-                  .planFragment();
-
-  VELOX_ASSERT_THROW(
-      Task::create(
-          "task-1",
-          std::move(plan),
-          0,
-          std::make_shared<core::QueryCtx>(driverExecutor_.get())),
-      "Plan node IDs must be unique. Found duplicate ID: 0.")
-}
-
+namespace {
 // A test join node whose build is skewed in terms of process time. The driver
 // id 0 processes slower than other drivers if paralelism greater than 1
 class TestSkewedJoinNode : public core::PlanNode {
@@ -392,6 +246,372 @@ class TestSkewedJoinBridgeTranslator
     return nullptr;
   }
 };
+
+class ExternalBlocker {
+ public:
+  folly::SemiFuture<folly::Unit> continueFuture() {
+    if (isBlocked_) {
+      auto [promise, future] = makeVeloxContinuePromiseContract();
+      continuePromise_ = std::move(promise);
+      return std::move(future);
+    }
+    return folly::SemiFuture<folly::Unit>();
+  }
+
+  void unblock() {
+    if (isBlocked_) {
+      continuePromise_.setValue();
+      isBlocked_ = false;
+    }
+  }
+
+  void block() {
+    isBlocked_ = true;
+  }
+
+  bool isBlocked() const {
+    return isBlocked_;
+  }
+
+ private:
+  bool isBlocked_ = false;
+  folly::Promise<folly::Unit> continuePromise_;
+};
+
+// A test node that normally just re-project/passthrough the output from input
+// When the node is blocked by external even (via externalBlocker), the operator
+// will signal kBlocked. The pipeline can ONLY proceed again when it is
+// unblocked externally.
+class TestExternalBlockableNode : public core::PlanNode {
+ public:
+  TestExternalBlockableNode(
+      const core::PlanNodeId& id,
+      core::PlanNodePtr source,
+      std::shared_ptr<ExternalBlocker> externalBlocker)
+      : PlanNode(id),
+        sources_{std::move(source)},
+        externalBlocker_(std::move(externalBlocker)) {}
+
+  const RowTypePtr& outputType() const override {
+    return sources_[0]->outputType();
+  }
+
+  const std::vector<core::PlanNodePtr>& sources() const override {
+    return sources_;
+  }
+
+  std::string_view name() const override {
+    return "external blocking node";
+  }
+
+  ExternalBlocker* externalBlocker() const {
+    return externalBlocker_.get();
+  }
+
+ private:
+  void addDetails(std::stringstream& /* stream */) const override {}
+
+  std::vector<core::PlanNodePtr> sources_;
+  std::shared_ptr<ExternalBlocker> externalBlocker_;
+};
+
+class TestExternalBlockableOperator : public exec::Operator {
+ public:
+  TestExternalBlockableOperator(
+      int32_t operatorId,
+      exec::DriverCtx* driverCtx,
+      std::shared_ptr<const TestExternalBlockableNode> node)
+      : Operator(
+            driverCtx,
+            node->outputType(),
+            operatorId,
+            node->id(),
+            "ExternalBlockable"),
+        externalBlocker_(node->externalBlocker()) {}
+
+  bool needsInput() const override {
+    return !noMoreInput_;
+  }
+
+  void addInput(RowVectorPtr input) override {
+    input_ = std::move(input);
+  }
+
+  RowVectorPtr getOutput() override {
+    // If this operator is signaled to be blocked externally
+    if (externalBlocker_->isBlocked()) {
+      continueFuture_ = externalBlocker_->continueFuture();
+      return nullptr;
+    }
+    auto output = std::move(input_);
+    input_ = nullptr;
+    return output;
+  }
+
+  exec::BlockingReason isBlocked(ContinueFuture* future) override {
+    if (continueFuture_.valid()) {
+      *future = std::move(continueFuture_);
+      return exec::BlockingReason::kWaitForConsumer;
+    }
+    return exec::BlockingReason::kNotBlocked;
+  }
+
+  bool isFinished() override {
+    return noMoreInput_;
+  }
+
+ private:
+  RowVectorPtr input_;
+  ExternalBlocker* externalBlocker_;
+  folly::SemiFuture<folly::Unit> continueFuture_;
+};
+
+class TestExternalBlockableTranslator
+    : public exec::Operator::PlanNodeTranslator {
+  std::unique_ptr<exec::Operator> toOperator(
+      exec::DriverCtx* ctx,
+      int32_t id,
+      const core::PlanNodePtr& node) override {
+    if (auto castedNode =
+            std::dynamic_pointer_cast<const TestExternalBlockableNode>(node)) {
+      return std::make_unique<TestExternalBlockableOperator>(
+          id, ctx, castedNode);
+    }
+    return nullptr;
+  }
+};
+
+// A test node creates operator that allocate memory from velox memory pool on
+// construction.
+class TestBadMemoryNode : public core::PlanNode {
+ public:
+  TestBadMemoryNode(const core::PlanNodeId& id, core::PlanNodePtr source)
+      : PlanNode(id), sources_{std::move(source)} {}
+
+  const RowTypePtr& outputType() const override {
+    return sources_[0]->outputType();
+  }
+
+  const std::vector<core::PlanNodePtr>& sources() const override {
+    return sources_;
+  }
+
+  std::string_view name() const override {
+    return "bad memory node";
+  }
+
+ private:
+  void addDetails(std::stringstream& /* stream */) const override {}
+
+  std::vector<core::PlanNodePtr> sources_;
+};
+
+class TestBadMemoryOperator : public exec::Operator {
+ public:
+  TestBadMemoryOperator(
+      int32_t operatorId,
+      exec::DriverCtx* driverCtx,
+      std::shared_ptr<const TestBadMemoryNode> node)
+      : Operator(
+            driverCtx,
+            node->outputType(),
+            operatorId,
+            node->id(),
+            "BadMemory") {
+    pool()->allocateNonContiguous(1, allocation_);
+  }
+
+  bool needsInput() const override {
+    return !noMoreInput_;
+  }
+
+  void addInput(RowVectorPtr /*unused*/) override {}
+
+  RowVectorPtr getOutput() override {
+    return nullptr;
+  }
+
+  exec::BlockingReason isBlocked(ContinueFuture* /*unused*/) override {
+    return exec::BlockingReason::kNotBlocked;
+  }
+
+  bool isFinished() override {
+    return noMoreInput_;
+  }
+
+ private:
+  memory::Allocation allocation_;
+};
+
+class TestBadMemoryTranslator : public exec::Operator::PlanNodeTranslator {
+  std::unique_ptr<exec::Operator> toOperator(
+      exec::DriverCtx* ctx,
+      int32_t id,
+      const core::PlanNodePtr& node) override {
+    if (auto castedNode =
+            std::dynamic_pointer_cast<const TestBadMemoryNode>(node)) {
+      return std::make_unique<TestBadMemoryOperator>(id, ctx, castedNode);
+    }
+    return nullptr;
+  }
+};
+} // namespace
+class TaskTest : public HiveConnectorTestBase {
+ protected:
+  static std::pair<std::shared_ptr<exec::Task>, std::vector<RowVectorPtr>>
+  executeSingleThreaded(
+      core::PlanFragment plan,
+      const std::unordered_map<std::string, std::vector<std::string>>&
+          filePaths = {}) {
+    auto task = Task::create(
+        "single.execution.task.0", plan, 0, std::make_shared<core::QueryCtx>());
+
+    for (const auto& [nodeId, paths] : filePaths) {
+      for (const auto& path : paths) {
+        task->addSplit(nodeId, exec::Split(makeHiveConnectorSplit(path)));
+      }
+      task->noMoreSplits(nodeId);
+    }
+
+    VELOX_CHECK(task->supportsSingleThreadedExecution());
+
+    vector_size_t numRows = 0;
+    std::vector<RowVectorPtr> results;
+    for (;;) {
+      auto result = task->next();
+      if (!result) {
+        break;
+      }
+
+      for (auto& child : result->children()) {
+        child->loadedVector();
+      }
+      results.push_back(result);
+      numRows += result->size();
+    }
+
+    VELOX_CHECK(waitForTaskCompletion(task.get()));
+
+    auto planNodeStats = toPlanStats(task->taskStats());
+    VELOX_CHECK(planNodeStats.count(plan.planNode->id()));
+    VELOX_CHECK_EQ(numRows, planNodeStats.at(plan.planNode->id()).outputRows);
+    VELOX_CHECK_EQ(
+        results.size(), planNodeStats.at(plan.planNode->id()).outputVectors);
+
+    return {task, results};
+  }
+};
+
+TEST_F(TaskTest, wrongPlanNodeForSplit) {
+  auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
+      "test",
+      "file:/tmp/abc",
+      facebook::velox::dwio::common::FileFormat::DWRF,
+      0,
+      100);
+
+  auto plan = PlanBuilder()
+                  .tableScan(ROW({"a", "b"}, {INTEGER(), DOUBLE()}))
+                  .project({"a * a", "b + b"})
+                  .planFragment();
+
+  auto task = Task::create(
+      "task-1",
+      std::move(plan),
+      0,
+      std::make_shared<core::QueryCtx>(driverExecutor_.get()));
+
+  ASSERT_EQ(
+      task->toString(), "{Task task-1 (task-1)Plan: -- Project\n\n drivers:\n");
+  ASSERT_EQ(
+      task->toJsonString(),
+      "{\n  \"concurrentSplitGroups\": 1,\n  \"drivers\": {},\n  \"exchangeClientByPlanNode\": {},\n  \"groupedPartitionedOutput\": false,\n  \"id\": \"task-1\",\n  \"noMoreOutputBuffers\": false,\n  \"numDriversPerSplitGroup\": 0,\n  \"numDriversUngrouped\": 0,\n  \"numFinishedDrivers\": 0,\n  \"numRunningDrivers\": 0,\n  \"numRunningSplitGroups\": 0,\n  \"numThreads\": 0,\n  \"numTotalDrivers_\": 0,\n  \"onThreadSince\": \"0\",\n  \"partitionedOutputConsumed\": false,\n  \"plan\": \"-- Project\\n\",\n  \"shortId\": \"task-1\",\n  \"state\": \"Running\",\n  \"terminateRequested_\": \"0\"\n}");
+  ASSERT_EQ(
+      task->toShortJsonString(),
+      "{\n  \"id\": \"task-1\",\n  \"numFinishedDrivers\": 0,\n  \"numRunningDrivers\": 0,\n  \"numThreads\": 0,\n  \"numTotalDrivers_\": 0,\n  \"pauseRequested_\": \"0\",\n  \"shortId\": \"task-1\",\n  \"state\": \"Running\",\n  \"terminateRequested_\": \"0\"\n}");
+
+  // Add split for the source node.
+  task->addSplit("0", exec::Split(folly::copy(connectorSplit)));
+
+  // Add an empty split.
+  task->addSplit("0", exec::Split());
+
+  // Try to add split for a non-source node.
+  auto errorMessage =
+      "Splits can be associated only with leaf plan nodes which require splits. Plan node ID 1 doesn't refer to such plan node.";
+  VELOX_ASSERT_THROW(
+      task->addSplit("1", exec::Split(folly::copy(connectorSplit))),
+      errorMessage)
+
+  VELOX_ASSERT_THROW(
+      task->addSplitWithSequence(
+          "1", exec::Split(folly::copy(connectorSplit)), 3),
+      errorMessage)
+
+  VELOX_ASSERT_THROW(task->setMaxSplitSequenceId("1", 9), errorMessage)
+
+  VELOX_ASSERT_THROW(task->noMoreSplits("1"), errorMessage)
+
+  VELOX_ASSERT_THROW(task->noMoreSplitsForGroup("1", 5), errorMessage)
+
+  // Try to add split for non-existent node.
+  errorMessage =
+      "Splits can be associated only with leaf plan nodes which require splits. Plan node ID 12 doesn't refer to such plan node.";
+  VELOX_ASSERT_THROW(
+      task->addSplit("12", exec::Split(folly::copy(connectorSplit))),
+      errorMessage)
+
+  VELOX_ASSERT_THROW(
+      task->addSplitWithSequence(
+          "12", exec::Split(folly::copy(connectorSplit)), 3),
+      errorMessage)
+
+  VELOX_ASSERT_THROW(task->setMaxSplitSequenceId("12", 9), errorMessage)
+
+  VELOX_ASSERT_THROW(task->noMoreSplits("12"), errorMessage)
+
+  VELOX_ASSERT_THROW(task->noMoreSplitsForGroup("12", 5), errorMessage)
+
+  // Try to add split for a Values source node.
+  plan =
+      PlanBuilder()
+          .values({makeRowVector(ROW({"a", "b"}, {INTEGER(), DOUBLE()}), 10)})
+          .project({"a * a", "b + b"})
+          .planFragment();
+
+  auto valuesTask = Task::create(
+      "task-2",
+      std::move(plan),
+      0,
+      std::make_shared<core::QueryCtx>(driverExecutor_.get()));
+  errorMessage =
+      "Splits can be associated only with leaf plan nodes which require splits. Plan node ID 0 doesn't refer to such plan node.";
+  VELOX_ASSERT_THROW(
+      valuesTask->addSplit("0", exec::Split(folly::copy(connectorSplit))),
+      errorMessage)
+}
+
+TEST_F(TaskTest, duplicatePlanNodeIds) {
+  auto plan = PlanBuilder()
+                  .tableScan(ROW({"a", "b"}, {INTEGER(), DOUBLE()}))
+                  .hashJoin(
+                      {"a"},
+                      {"a1"},
+                      PlanBuilder()
+                          .tableScan(ROW({"a1", "b1"}, {INTEGER(), DOUBLE()}))
+                          .planNode(),
+                      "",
+                      {"b", "b1"})
+                  .planFragment();
+
+  VELOX_ASSERT_THROW(
+      Task::create(
+          "task-1",
+          std::move(plan),
+          0,
+          std::make_shared<core::QueryCtx>(driverExecutor_.get())),
+      "Plan node IDs must be unique. Found duplicate ID: 0.")
+}
 
 // This test simulates the following execution sequence that potentially can
 // cause a deadlock:
@@ -623,140 +843,6 @@ TEST_F(TaskTest, singleThreadedCrossJoin) {
   }
 }
 
-class ExternalBlocker {
- public:
-  folly::SemiFuture<folly::Unit> continueFuture() {
-    if (isBlocked_) {
-      auto [promise, future] = makeVeloxContinuePromiseContract();
-      continuePromise_ = std::move(promise);
-      return std::move(future);
-    }
-    return folly::SemiFuture<folly::Unit>();
-  }
-
-  void unblock() {
-    if (isBlocked_) {
-      continuePromise_.setValue();
-      isBlocked_ = false;
-    }
-  }
-
-  void block() {
-    isBlocked_ = true;
-  }
-
-  bool isBlocked() const {
-    return isBlocked_;
-  }
-
- private:
-  bool isBlocked_ = false;
-  folly::Promise<folly::Unit> continuePromise_;
-};
-
-// A test node that normally just re-project/passthrough the output from input
-// When the node is blocked by external even (via externalBlocker), the operator
-// will signal kBlocked. The pipeline can ONLY proceed again when it is
-// unblocked externally.
-class TestExternalBlockableNode : public core::PlanNode {
- public:
-  TestExternalBlockableNode(
-      const core::PlanNodeId& id,
-      core::PlanNodePtr source,
-      std::shared_ptr<ExternalBlocker> externalBlocker)
-      : PlanNode(id),
-        sources_{std::move(source)},
-        externalBlocker_(std::move(externalBlocker)) {}
-
-  const RowTypePtr& outputType() const override {
-    return sources_[0]->outputType();
-  }
-
-  const std::vector<core::PlanNodePtr>& sources() const override {
-    return sources_;
-  }
-
-  std::string_view name() const override {
-    return "external blocking node";
-  }
-
-  ExternalBlocker* externalBlocker() const {
-    return externalBlocker_.get();
-  }
-
- private:
-  void addDetails(std::stringstream& /* stream */) const override {}
-
-  std::vector<core::PlanNodePtr> sources_;
-  std::shared_ptr<ExternalBlocker> externalBlocker_;
-};
-
-class TestExternalBlockableOperator : public exec::Operator {
- public:
-  TestExternalBlockableOperator(
-      int32_t operatorId,
-      exec::DriverCtx* driverCtx,
-      std::shared_ptr<const TestExternalBlockableNode> node)
-      : Operator(
-            driverCtx,
-            node->outputType(),
-            operatorId,
-            node->id(),
-            "ExternalBlockable"),
-        externalBlocker_(node->externalBlocker()) {}
-
-  bool needsInput() const override {
-    return !noMoreInput_;
-  }
-
-  void addInput(RowVectorPtr input) override {
-    input_ = std::move(input);
-  }
-
-  RowVectorPtr getOutput() override {
-    // If this operator is signaled to be blocked externally
-    if (externalBlocker_->isBlocked()) {
-      continueFuture_ = externalBlocker_->continueFuture();
-      return nullptr;
-    }
-    auto output = std::move(input_);
-    input_ = nullptr;
-    return output;
-  }
-
-  exec::BlockingReason isBlocked(ContinueFuture* future) override {
-    if (continueFuture_.valid()) {
-      *future = std::move(continueFuture_);
-      return exec::BlockingReason::kWaitForConsumer;
-    }
-    return exec::BlockingReason::kNotBlocked;
-  }
-
-  bool isFinished() override {
-    return noMoreInput_;
-  }
-
- private:
-  RowVectorPtr input_;
-  ExternalBlocker* externalBlocker_;
-  folly::SemiFuture<folly::Unit> continueFuture_;
-};
-
-class TestExternalBlockableTranslator
-    : public exec::Operator::PlanNodeTranslator {
-  std::unique_ptr<exec::Operator> toOperator(
-      exec::DriverCtx* ctx,
-      int32_t id,
-      const core::PlanNodePtr& node) override {
-    if (auto castedNode =
-            std::dynamic_pointer_cast<const TestExternalBlockableNode>(node)) {
-      return std::make_unique<TestExternalBlockableOperator>(
-          id, ctx, castedNode);
-    }
-    return nullptr;
-  }
-};
-
 TEST_F(TaskTest, singleThreadedExecutionExternalBlockable) {
   exec::Operator::registerOperator(
       std::make_unique<TestExternalBlockableTranslator>());
@@ -840,12 +926,12 @@ TEST_F(TaskTest, updateBroadCastOutputBuffers) {
                   .project({"c0 % 10"})
                   .partitionedOutputBroadcast({})
                   .planFragment();
-  auto bufferManager = PartitionedOutputBufferManager::getInstance().lock();
+  auto bufferManager = OutputBufferManager::getInstance().lock();
   {
     auto task = Task::create(
         "t0", plan, 0, std::make_shared<core::QueryCtx>(driverExecutor_.get()));
 
-    task->start(task, 1, 1);
+    task->start(1, 1);
 
     ASSERT_TRUE(task->updateOutputBuffers(10, true /*noMoreBuffers*/));
 
@@ -859,7 +945,7 @@ TEST_F(TaskTest, updateBroadCastOutputBuffers) {
     auto task = Task::create(
         "t1", plan, 0, std::make_shared<core::QueryCtx>(driverExecutor_.get()));
 
-    task->start(task, 1, 1);
+    task->start(1, 1);
 
     ASSERT_TRUE(task->updateOutputBuffers(5, false));
     ASSERT_TRUE(task->updateOutputBuffers(10, false));
@@ -999,6 +1085,7 @@ DEBUG_ONLY_TEST_F(TaskTest, liveStats) {
     EXPECT_EQ(3 * i, operatorStats.outputPositions);
     EXPECT_EQ(i, operatorStats.outputVectors);
     EXPECT_EQ(0, operatorStats.finishTiming.count);
+    EXPECT_EQ(0, operatorStats.backgroundTiming.count);
 
     EXPECT_EQ(1, liveStats[i].numTotalDrivers);
     EXPECT_EQ(0, liveStats[i].numCompletedDrivers);
@@ -1019,6 +1106,8 @@ DEBUG_ONLY_TEST_F(TaskTest, liveStats) {
   EXPECT_EQ(3 * numBatches, operatorStats.outputPositions);
   EXPECT_EQ(numBatches, operatorStats.outputVectors);
   EXPECT_EQ(1, operatorStats.finishTiming.count);
+  // No operators with background CPU time yet.
+  EXPECT_EQ(0, operatorStats.backgroundTiming.count);
 }
 
 TEST_F(TaskTest, outputBufferSize) {
@@ -1200,4 +1289,179 @@ DEBUG_ONLY_TEST_F(TaskTest, raceBetweenTaskPauseAndTerminate) {
   taskThread.join();
 }
 
+TEST_F(TaskTest, driverCreationMemoryAllocationCheck) {
+  exec::Operator::registerOperator(std::make_unique<TestBadMemoryTranslator>());
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
+  });
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .addNode([&](std::string id, core::PlanNodePtr input) mutable {
+            return std::make_shared<TestBadMemoryNode>(id, input);
+          })
+          .planFragment();
+  for (bool singleThreadExecution : {false, true}) {
+    SCOPED_TRACE(fmt::format("singleThreadExecution: ", singleThreadExecution));
+    auto badTask = Task::create(
+        "driverCreationMemoryAllocationCheck",
+        plan,
+        0,
+        std::make_shared<core::QueryCtx>());
+    if (singleThreadExecution) {
+      VELOX_ASSERT_THROW(
+          badTask->start(1), "Unexpected memory pool allocations");
+    } else {
+      VELOX_ASSERT_THROW(badTask->next(), "Unexpected memory pool allocations");
+    }
+  }
+}
+
+TEST_F(TaskTest, spillDirectoryLifecycleManagement) {
+  // Marks the spill directory as not already created and ensures that the Task
+  // handles creating it on first use and eventually deleting it on destruction.
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>(1'000, [](auto row) { return row % 300; }),
+      makeFlatVector<int64_t>(1'000, [](auto row) { return row; }),
+  });
+
+  core::PlanNodeId aggrNodeId;
+  const auto plan = PlanBuilder()
+                        .values({data})
+                        .singleAggregation({"c0"}, {"sum(c1)"}, {})
+                        .capturePlanNodeId(aggrNodeId)
+                        .planNode();
+  CursorParameters params;
+  params.planNode = plan;
+  params.queryCtx = std::make_shared<core::QueryCtx>(driverExecutor_.get());
+  params.queryCtx->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kSpillEnabled, "true"},
+       {core::QueryConfig::kAggregationSpillEnabled, "true"},
+       {core::QueryConfig::kTestingSpillPct, "100"}});
+  params.maxDrivers = 1;
+
+  auto cursor = std::make_unique<TaskCursor>(params);
+  std::shared_ptr<Task> task = cursor->task();
+  auto rootTempDir = exec::test::TempDirectoryPath::create();
+  auto tmpDirectoryPath =
+      rootTempDir->path + "/spillDirectoryLifecycleManagement";
+  task->setSpillDirectory(tmpDirectoryPath, false);
+
+  while (cursor->moveNext()) {
+  }
+  ASSERT_TRUE(waitForTaskCompletion(task.get(), 5'000'000));
+  EXPECT_EQ(exec::TaskState::kFinished, task->state());
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  auto& stats = taskStats.at(aggrNodeId);
+  ASSERT_GT(stats.spilledRows, 0);
+  cursor.reset(); // ensure 'task' has no other shared pointer.
+  OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
+}
+
+TEST_F(TaskTest, spillDirNotCreated) {
+  // Verify that no spill directory is created if spilling is not engaged.
+  const std::vector<RowVectorPtr> probeVectors = {makeRowVector(
+      {"t_c0", "t_c1"},
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4}),
+          makeFlatVector<int64_t>({10, 20, 30, 40}),
+      })};
+
+  const std::vector<RowVectorPtr> buildVectors = {makeRowVector(
+      {"u_c0"},
+      {
+          makeFlatVector<int64_t>({0, 1, 3, 5}),
+      })};
+
+  core::PlanNodeId hashJoinNodeId;
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  CursorParameters params;
+  // We use a hash join here as a Spiller object is created upfront which helps
+  // us ensure that the directory creation is delayed till spilling is executed.
+  params.planNode = PlanBuilder(planNodeIdGenerator)
+                        .values(probeVectors, true)
+                        .hashJoin(
+                            {"t_c0"},
+                            {"u_c0"},
+                            PlanBuilder(planNodeIdGenerator)
+                                .values(buildVectors, true)
+                                .planNode(),
+                            "",
+                            {"t_c0", "t_c1", "u_c0"})
+                        .capturePlanNodeId(hashJoinNodeId)
+                        .planNode();
+  params.queryCtx = std::make_shared<core::QueryCtx>(driverExecutor_.get());
+  params.queryCtx->testingOverrideConfigUnsafe(
+      {{core::QueryConfig::kSpillEnabled, "true"},
+       {core::QueryConfig::kJoinSpillEnabled, "true"},
+       {core::QueryConfig::kTestingSpillPct, "0"}});
+  params.maxDrivers = 1;
+
+  auto cursor = std::make_unique<TaskCursor>(params);
+  auto* task = cursor->task().get();
+  auto rootTempDir = exec::test::TempDirectoryPath::create();
+  auto tmpDirectoryPath = rootTempDir->path + "/spillDirNotCreated";
+  task->setSpillDirectory(tmpDirectoryPath, false);
+
+  while (cursor->moveNext()) {
+  }
+  ASSERT_TRUE(waitForTaskCompletion(task, 5'000'000));
+  EXPECT_EQ(exec::TaskState::kFinished, task->state());
+  auto taskStats = exec::toPlanStats(task->taskStats());
+  auto& stats = taskStats.at(hashJoinNodeId);
+  ASSERT_EQ(stats.spilledRows, 0);
+  // Check for spill folder without destroying the Task object to ensure its
+  // destructor has not removed the directory if it was created earlier.
+  auto fs = filesystems::getFileSystem(tmpDirectoryPath, nullptr);
+  EXPECT_FALSE(fs->exists(tmpDirectoryPath));
+}
+
+DEBUG_ONLY_TEST_F(TaskTest, resumeAfterTaskFinish) {
+  auto probeVector = makeRowVector(
+      {"t_c0"}, {makeFlatVector<int32_t>(10, [](auto row) { return row; })});
+  auto buildVector = makeRowVector(
+      {"u_c0"}, {makeFlatVector<int32_t>(10, [](auto row) { return row; })});
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan =
+      PlanBuilder(planNodeIdGenerator)
+          .values({probeVector})
+          .hashJoin(
+              {"t_c0"},
+              {"u_c0"},
+              PlanBuilder(planNodeIdGenerator).values({buildVector}).planNode(),
+              "",
+              {"t_c0", "u_c0"})
+          .planFragment();
+
+  std::atomic<bool> valuesWaitFlag{true};
+  folly::EventCount valuesWait;
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::Values::getOutput",
+      std::function<void(const velox::exec::Values*)>(
+          ([&](const velox::exec::Values* values) {
+            valuesWait.await([&]() { return !valuesWaitFlag.load(); });
+          })));
+
+  auto task = Task::create(
+      "task",
+      std::move(plan),
+      0,
+      std::make_shared<core::QueryCtx>(driverExecutor_.get()));
+  task->start(4, 1);
+
+  // Request pause and then unblock operators to proceed.
+  auto pauseWait = task->requestPause();
+  valuesWaitFlag = false;
+  valuesWait.notifyAll();
+  // Wait for task pause to complete.
+  pauseWait.wait();
+  // Finish the task and for a hash join, the probe operator should still be in
+  // waiting for build stage.
+  task->testingFinish();
+  // Resume the task and expect all drivers to close.
+  Task::resume(task);
+  ASSERT_TRUE(waitForTaskCompletion(task.get()));
+  task.reset();
+  waitForAllTasksToBeDeleted();
+}
 } // namespace facebook::velox::exec::test

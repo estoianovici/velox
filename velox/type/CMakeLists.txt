@@ -15,15 +15,18 @@ if(${VELOX_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
+add_subdirectory(parser)
 add_subdirectory(tz)
 add_subdirectory(fbhive)
 
 add_library(
   velox_type
+  Conversions.cpp
   DecimalUtil.cpp
   DoubleUtil.cpp
   Filter.cpp
   HugeInt.cpp
+  StringView.cpp
   StringView.h
   Subfield.cpp
   Timestamp.cpp

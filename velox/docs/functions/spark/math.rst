@@ -40,6 +40,10 @@ Mathematical Functions
 
     Returns the hyperbolic cosine of ``x``.
 
+.. spark:function:: cot(x) -> double
+
+    Returns the cotangent of ``x``(measured in radians). Supported type is DOUBLE.
+
 .. spark:function:: csc(x) -> double
 
     Returns the cosecant of ``x``.
@@ -47,11 +51,24 @@ Mathematical Functions
 .. spark:function:: divide(x, y) -> double
 
     Returns the results of dividing x by y. Performs floating point division.
+    Supported type is DOUBLE.
     Corresponds to Spark's operator ``/``. ::
 
         SELECT 3 / 2; -- 1.5
         SELECT 2L / 2L; -- 1.0
         SELECT 3 / 0; -- NULL
+
+.. spark:function:: divide(x, y) -> decimal
+
+    Returns the results of dividing x by y.
+    Supported type is DECIMAL which can be different precision and scale.
+    Performs floating point division.
+    The result type depends on the precision and scale of x and y.
+    Overflow results return null. Corresponds to Spark's operator ``/``. ::
+
+        SELECT CAST(1 as DECIMAL(17, 3)) / CAST(2 as DECIMAL(17, 3)); -- decimal 0.500000000000000000000
+        SELECT CAST(1 as DECIMAL(20, 3)) / CAST(20 as DECIMAL(20, 2)); -- decimal 0.0500000000000000000
+        SELECT CAST(1 as DECIMAL(20, 3)) / CAST(0 as DECIMAL(20, 3)); -- NULL
 
 .. spark:function:: exp(x) -> double
 
@@ -71,10 +88,30 @@ Mathematical Functions
 
     Returns the natural logarithm of the “given value ``x`` plus one”.
     Return NULL if x is less than or equal to -1.
+
+.. spark:function:: log2(x) -> double
+
+    Returns the logarithm of ``x`` with base 2. Return null for zero and non-positive input.
+
+.. spark:function:: log10(x) -> double
+
+    Returns the logarithm of ``x`` with base 10. Return null for zero and non-positive input.
+
 .. spark:function:: multiply(x, y) -> [same as x]
 
     Returns the result of multiplying x by y. The types of x and y must be the same.
     For integral types, overflow results in an error. Corresponds to Spark's operator ``*``.
+
+.. spark:function:: multiply(x, y) -> [decimal]
+
+    Returns the result of multiplying x by y. The types of x and y must be decimal which can be different precision and scale.
+    The result type depends on the precision and scale of x and y.
+    Overflow results return null. Corresponds to Spark's operator ``*``. ::
+
+        SELECT CAST(1 as DECIMAL(17, 3)) * CAST(2 as DECIMAL(17, 3)); -- decimal 2.000000
+        SELECT CAST(1 as DECIMAL(20, 3)) * CAST(20 as DECIMAL(20, 2)); -- decimal 20.00000
+        SELECT CAST(1 as DECIMAL(20, 3)) * CAST(0 as DECIMAL(20, 3)); -- decimal 0.000000
+        SELECT CAST(201e-38 as DECIMAL(38, 38)) * CAST(301e-38 as DECIMAL(38, 38)); -- decimal 0.0000000000000000000000000000000000000
 
 .. spark:function:: not(x) -> boolean
 
@@ -87,6 +124,7 @@ Mathematical Functions
 .. spark:function:: pmod(n, m) -> [same as n]
 
     Returns the positive remainder of n divided by m.
+    Supported types are: TINYINT, SMALLINT, INTEGER, BIGINT, FLOAT and DOUBLE.
 
 .. spark:function:: power(x, p) -> double
 
@@ -94,11 +132,29 @@ Mathematical Functions
 
 .. spark:function:: rand() -> double
 
-    Returns a random value with independent and identically distributed uniformly distributed values in [0, 1). ::
+    Returns a random value with uniformly distributed values in [0, 1). ::
 
         SELECT rand(); -- 0.9629742951434543
-        SELECT rand(0); -- 0.7604953758285915
-        SELECT rand(null); -- 0.7604953758285915
+
+.. spark:function:: rand(seed, partitionIndex) -> double
+
+    Returns a random value with uniformly distributed values in [0, 1) using a seed formed
+    by combining user-specified ``seed`` and framework provided ``partitionIndex``. The
+    framework is responsible for deterministic partitioning of the data and assigning unique
+    ``partitionIndex`` to each thread (in a deterministic way).
+    ``seed`` must be constant. NULL ``seed`` is identical to zero ``seed``. ``partitionIndex``
+    cannot be NULL. ::
+
+        SELECT rand(0);    -- 0.5488135024422883
+        SELECT rand(NULL); -- 0.5488135024422883
+
+.. spark:function:: random() -> double
+
+    An alias for ``rand()``.
+
+.. spark:function:: random(seed, partitionIndex) -> double
+
+    An alias for ``rand(seed, partitionIndex)``.
 
 .. spark:function:: remainder(n, m) -> [same as n]
 
@@ -108,6 +164,7 @@ Mathematical Functions
 
     Returns ``x`` rounded to ``d`` decimal places using HALF_UP rounding mode. 
     In HALF_UP rounding, the digit 5 is rounded up.
+    Supported types for ``x`` are integral and floating point types.
 
 .. spark:function:: sec(x) -> double
 

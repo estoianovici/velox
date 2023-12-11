@@ -28,44 +28,50 @@ void logRowVector(const RowVectorPtr& rowVector) {
   if (rowVector == nullptr) {
     return;
   }
-  LOG(INFO) << rowVector->childrenSize() << " vectors as input:";
+  VLOG(1) << rowVector->childrenSize() << " vectors as input:";
   for (const auto& child : rowVector->children()) {
-    LOG(INFO) << "\t" << child->toString(/*recursive=*/true);
+    VLOG(1) << "\t" << child->toString(/*recursive=*/true);
   }
 
-  if (VLOG_IS_ON(1)) {
-    LOG(INFO) << "RowVector contents (" << rowVector->type()->toString()
-              << "):";
+  VLOG(1) << "RowVector contents (" << rowVector->type()->toString() << "):";
 
-    for (vector_size_t i = 0; i < rowVector->size(); ++i) {
-      LOG(INFO) << "\tAt " << i << ": " << rowVector->toString(i);
-    }
+  for (vector_size_t i = 0; i < rowVector->size(); ++i) {
+    VLOG(1) << "\tAt " << i << ": " << rowVector->toString(i);
   }
 }
-namespace {
-auto createCopy(const VectorPtr& input) {
-  VectorPtr result;
-  SelectivityVector rows(input->size());
-  BaseVector::ensureWritable(rows, input->type(), input->pool(), result);
-  result->copy(input.get(), rows, nullptr);
-  return result;
-}
-} // namespace
 
-void compareVectors(
+void compareInputs(const VectorPtr& before, const VectorPtr& after) {
+  SelectivityVector rows(before->size());
+
+  // Print vector contents if in verbose mode.
+  VLOG(1) << "== Original input: ";
+  rows.applyToSelected([&](vector_size_t row) {
+    VLOG(1) << fmt::format(
+        "At {} [ {} vs {} ]", row, before->toString(row), after->toString(row));
+  });
+  VLOG(1) << "===================";
+
+  rows.applyToSelected([&](vector_size_t row) {
+    VELOX_CHECK(
+        before->equalValueAt(after.get(), row, row),
+        "Input has changed at idx '{}': '{}' vs. '{}'",
+        row,
+        before->toString(row),
+        after->toString(row));
+  });
+}
+
+void compareResults(
     const VectorPtr& left,
     const VectorPtr& right,
     const SelectivityVector& rows) {
   // Print vector contents if in verbose mode.
-  size_t vectorSize = left->size();
-  if (VLOG_IS_ON(1)) {
-    LOG(INFO) << "== Result contents (common vs. simple): ";
-    rows.applyToSelected([&](vector_size_t row) {
-      LOG(INFO) << fmt::format(
-          "At {} [ {} vs {} ]", row, left->toString(row), right->toString(row));
-    });
-    LOG(INFO) << "===================";
-  }
+  VLOG(1) << "== Result contents (common vs. simple): ";
+  rows.applyToSelected([&](vector_size_t row) {
+    VLOG(1) << fmt::format(
+        "At {} [ {} vs {} ]", row, left->toString(row), right->toString(row));
+  });
+  VLOG(1) << "===================";
 
   rows.applyToSelected([&](vector_size_t row) {
     VELOX_CHECK(
@@ -151,19 +157,24 @@ ResultOrError ExpressionVerifier::verify(
     exec::ExprSet exprSetCommon(
         plans, execCtx_, !options_.disableConstantFolding);
     auto inputRowVector = rowVector;
+    VectorPtr copiedInput;
     if (!columnsToWrapInLazy.empty()) {
       inputRowVector =
           VectorFuzzer::fuzzRowChildrenToLazy(rowVector, columnsToWrapInLazy);
-      LOG(INFO) << "Modified inputs for common eval path: ";
+      VLOG(1) << "Modified inputs for common eval path: ";
       logRowVector(inputRowVector);
+    } else {
+      // Copy loads lazy vectors so only do this when there are no lazy inputs.
+      copiedInput = BaseVector::copy(*inputRowVector);
     }
-
-    auto copy = createCopy(inputRowVector);
 
     exec::EvalCtx evalCtxCommon(execCtx_, &exprSetCommon, inputRowVector.get());
     exprSetCommon.eval(rows, evalCtxCommon, commonEvalResult);
-    assertEqualVectors(copy, inputRowVector);
 
+    if (copiedInput) {
+      // Flatten the input vector as an optimization if its very deeply nested.
+      compareInputs(copiedInput, BaseVector::copy(*inputRowVector));
+    }
   } catch (const VeloxUserError&) {
     if (!canThrow) {
       LOG(ERROR)
@@ -189,9 +200,11 @@ ResultOrError ExpressionVerifier::verify(
     exec::EvalCtx evalCtxSimplified(
         execCtx_, &exprSetSimplified, rowVector.get());
 
-    auto copy = createCopy(rowVector);
+    auto copy = BaseVector::copy(*rowVector);
     exprSetSimplified.eval(rows, evalCtxSimplified, simplifiedEvalResult);
-    assertEqualVectors(copy, rowVector);
+
+    // Flatten the input vector as an optimization if its very deeply nested.
+    compareInputs(copy, BaseVector::copy(*rowVector));
 
   } catch (const VeloxUserError&) {
     exceptionSimplifiedPtr = std::current_exception();
@@ -215,7 +228,7 @@ ResultOrError ExpressionVerifier::verify(
       VELOX_CHECK_EQ(commonEvalResult.size(), plans.size());
       VELOX_CHECK_EQ(simplifiedEvalResult.size(), plans.size());
       for (int i = 0; i < plans.size(); ++i) {
-        compareVectors(commonEvalResult[i], simplifiedEvalResult[i], rows);
+        compareResults(commonEvalResult[i], simplifiedEvalResult[i], rows);
       }
     }
   } catch (...) {

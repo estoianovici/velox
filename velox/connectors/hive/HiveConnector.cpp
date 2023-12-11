@@ -17,11 +17,9 @@
 #include "velox/connectors/hive/HiveConnector.h"
 
 #include "velox/common/base/Fs.h"
-#ifndef VELOX_ENABLE_BACKWARD_COMPATIBILITY
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/HiveDataSink.h"
 #include "velox/connectors/hive/HiveDataSource.h"
-#endif
 #include "velox/connectors/hive/HivePartitionFunction.h"
 // Meta's buck build system needs this check.
 #ifdef VELOX_ENABLE_GCS
@@ -50,24 +48,28 @@ using namespace facebook::velox::dwrf;
 
 namespace facebook::velox::connector::hive {
 
-int32_t numCachedFileHandles(const Config* properties) {
-  return properties ? HiveConfig::numCacheFileHandles(properties) : 20'000;
-}
-
 HiveConnector::HiveConnector(
     const std::string& id,
-    std::shared_ptr<const Config> properties,
+    std::shared_ptr<const Config> config,
     folly::Executor* FOLLY_NULLABLE executor)
-    : Connector(id, properties),
+    : Connector(id),
+      hiveConfig_(std::make_shared<HiveConfig>(config)),
       fileHandleFactory_(
-          std::make_unique<
-              SimpleLRUCache<std::string, std::shared_ptr<FileHandle>>>(
-              numCachedFileHandles(properties.get())),
-          std::make_unique<FileHandleGenerator>(properties)),
+          hiveConfig_->isFileHandleCacheEnabled()
+              ? std::make_unique<
+                    SimpleLRUCache<std::string, std::shared_ptr<FileHandle>>>(
+                    hiveConfig_->numCacheFileHandles())
+              : nullptr,
+          std::make_unique<FileHandleGenerator>(nullptr)),
       executor_(executor) {
-  LOG(INFO) << "Hive connector " << connectorId() << " created with maximum of "
-            << numCachedFileHandles(properties.get())
-            << " cached file handles.";
+  if (hiveConfig_->isFileHandleCacheEnabled()) {
+    LOG(INFO) << "Hive connector " << connectorId()
+              << " created with maximum of "
+              << hiveConfig_->numCacheFileHandles() << " cached file handles.";
+  } else {
+    LOG(INFO) << "Hive connector " << connectorId()
+              << " created with file handle cache disabled";
+  }
 }
 
 std::unique_ptr<DataSource> HiveConnector::createDataSource(
@@ -78,13 +80,14 @@ std::unique_ptr<DataSource> HiveConnector::createDataSource(
         std::shared_ptr<connector::ColumnHandle>>& columnHandles,
     ConnectorQueryCtx* connectorQueryCtx) {
   dwio::common::ReaderOptions options(connectorQueryCtx->memoryPool());
-  options.setMaxCoalesceBytes(
-      HiveConfig::maxCoalescedBytes(connectorQueryCtx->config()));
-  options.setMaxCoalesceDistance(
-      HiveConfig::maxCoalescedDistanceBytes(connectorQueryCtx->config()));
+  options.setMaxCoalesceBytes(hiveConfig_->maxCoalescedBytes());
+  options.setMaxCoalesceDistance(hiveConfig_->maxCoalescedDistanceBytes());
   options.setFileColumnNamesReadAsLowerCase(
-      HiveConfig::isFileColumnNamesReadAsLowerCase(
-          connectorQueryCtx->config()));
+      hiveConfig_->isFileColumnNamesReadAsLowerCase(
+          connectorQueryCtx->sessionProperties()));
+  options.setUseColumnNamesForColumnMapping(
+      hiveConfig_->isOrcUseColumnNames(connectorQueryCtx->sessionProperties()));
+
   return std::make_unique<HiveDataSource>(
       outputType,
       tableHandle,
@@ -107,7 +110,11 @@ std::unique_ptr<DataSink> HiveConnector::createDataSink(
   VELOX_CHECK_NOT_NULL(
       hiveInsertHandle, "Hive connector expecting hive write handle!");
   return std::make_unique<HiveDataSink>(
-      inputType, hiveInsertHandle, connectorQueryCtx, commitStrategy);
+      inputType,
+      hiveInsertHandle,
+      connectorQueryCtx,
+      commitStrategy,
+      hiveConfig_);
 }
 
 std::unique_ptr<core::PartitionFunction> HivePartitionFunctionSpec::create(
@@ -132,7 +139,7 @@ std::unique_ptr<core::PartitionFunction> HivePartitionFunctionSpec::create(
 
 void HiveConnectorFactory::initialize() {
   static bool once = []() {
-    dwio::common::WriteFileDataSink::registerLocalFileFactory();
+    dwio::common::registerFileSinks();
     dwrf::registerDwrfReaderFactory();
     dwrf::registerDwrfWriterFactory();
 // Meta's buck build system needs this check.

@@ -63,7 +63,6 @@ endif()
 
 if(${VELOX_ENABLE_DUCKDB})
   add_subdirectory(duckdb)
-  add_subdirectory(external/duckdb)
 endif()
 
 if(${VELOX_CODEGEN_SUPPORT})
@@ -72,6 +71,7 @@ endif()
 
 if(${VELOX_ENABLE_GPU})
   add_subdirectory(experimental/gpu)
+  add_subdirectory(experimental/wave)
 endif()
 
 # substrait converter

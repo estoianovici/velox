@@ -49,8 +49,8 @@ using ClassPageCount = int32_t;
 class MmapAllocator : public MemoryAllocator {
  public:
   struct Options {
-    ///  Capacity in bytes, default 512MB
-    uint64_t capacity = 1L << 29;
+    ///  Capacity in bytes, default unlimited.
+    uint64_t capacity = kDefaultCapacityBytes;
 
     /// If set true, allocations larger than largest size class size will be
     /// delegated to ManagedMmapArena. Otherwise a system mmap call will be
@@ -108,6 +108,8 @@ class MmapAllocator : public MemoryAllocator {
   void freeContiguous(ContiguousAllocation& allocation) override;
 
   int64_t freeNonContiguous(Allocation& allocation) override;
+
+  MachinePageCount unmap(MachinePageCount targetPages) override;
 
   void freeBytes(void* p, uint64_t bytes) noexcept override;
 
@@ -275,7 +277,7 @@ class MmapAllocator : public MemoryAllocator {
     const int32_t pageBitmapSize_;
 
     // Serializes access to all data members and private methods.
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 
     // Start of address range.
     uint8_t* address_;
@@ -360,7 +362,7 @@ class MmapAllocator : public MemoryAllocator {
 
   // Frees 'allocation and returns the number of freed pages. Does not
   // update 'numAllocated'.
-  MachinePageCount freeInternal(Allocation& allocation);
+  MachinePageCount freeNonContiguousInternal(Allocation& allocation);
 
   void markAllMapped(const Allocation& allocation);
 

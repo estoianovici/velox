@@ -254,7 +254,9 @@ class NonNumericArbitrary : public exec::Aggregate {
   }
 };
 
-exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
+} // namespace
+
+void registerArbitraryAggregate(const std::string& prefix) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
       exec::AggregateFunctionSignatureBuilder()
           .typeVariable("T")
@@ -263,10 +265,11 @@ exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
           .argumentType("T")
           .build()};
 
-  return exec::registerAggregateFunction(
-      name,
+  std::vector<std::string> names = {prefix + kArbitrary, prefix + kAnyValue};
+  exec::registerAggregateFunction(
+      names,
       std::move(signatures),
-      [name](
+      [name = names.front()](
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& /*resultType*/,
@@ -291,10 +294,17 @@ exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
             return std::make_unique<ArbitraryAggregate<double>>(inputType);
           case TypeKind::TIMESTAMP:
             return std::make_unique<ArbitraryAggregate<Timestamp>>(inputType);
+          case TypeKind::VARBINARY:
+            [[fallthrough]];
           case TypeKind::VARCHAR:
+            [[fallthrough]];
           case TypeKind::ARRAY:
+            [[fallthrough]];
           case TypeKind::MAP:
+            [[fallthrough]];
           case TypeKind::ROW:
+            [[fallthrough]];
+          case TypeKind::UNKNOWN:
             return std::make_unique<NonNumericArbitrary>(inputType);
           default:
             VELOX_FAIL(
@@ -303,12 +313,6 @@ exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
                 inputType->kindName());
         }
       });
-}
-
-} // namespace
-
-void registerArbitraryAggregate(const std::string& prefix) {
-  registerArbitrary(prefix + kArbitrary);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

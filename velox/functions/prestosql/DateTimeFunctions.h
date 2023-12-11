@@ -103,38 +103,64 @@ template <typename T>
 struct DateFunction : public TimestampWithTimezoneSupport<T> {
   VELOX_DEFINE_FUNCTION_TYPES(T);
 
+  const date::time_zone* timeZone_ = nullptr;
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const core::QueryConfig& config,
+      const arg_type<Varchar>* date) {
+    timeZone_ = getTimeZoneFromConfig(config);
+  }
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const core::QueryConfig& config,
+      const arg_type<Timestamp>* timestamp) {
+    timeZone_ = getTimeZoneFromConfig(config);
+  }
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const core::QueryConfig& config,
+      const arg_type<TimestampWithTimezone>* timestampWithTimezone) {
+    timeZone_ = getTimeZoneFromConfig(config);
+  }
+
   FOLLY_ALWAYS_INLINE void call(
       out_type<Date>& result,
       const arg_type<Varchar>& date) {
-    bool nullOutput;
     result = DATE()->toDays(date);
   }
 
-  int32_t timestampToDate(const Timestamp& t, bool& nullOutput) {
-    static const int32_t kSecsPerDay{86'400};
-    auto seconds = t.getSeconds();
-    if (seconds >= 0 || seconds % kSecsPerDay == 0) {
-      return seconds / kSecsPerDay;
+  int32_t timestampToDate(const Timestamp& input) {
+    auto convertToDate = [](const Timestamp& t) -> int32_t {
+      static const int32_t kSecsPerDay{86'400};
+      auto seconds = t.getSeconds();
+      if (seconds >= 0 || seconds % kSecsPerDay == 0) {
+        return seconds / kSecsPerDay;
+      }
+      // For division with negatives, minus 1 to compensate the discarded
+      // fractional part. e.g. -1/86'400 yields 0, yet it should be considered
+      // as -1 day.
+      return seconds / kSecsPerDay - 1;
+    };
+
+    if (timeZone_ != nullptr) {
+      Timestamp t = input;
+      t.toTimezone(*timeZone_);
+      return convertToDate(t);
     }
-    // For division with negatives, minus 1 to compensate the discarded
-    // fractional part. e.g. -1/86'400 yields 0, yet it should be considered as
-    // -1 day.
-    return seconds / kSecsPerDay - 1;
+
+    return convertToDate(input);
   }
 
   FOLLY_ALWAYS_INLINE void call(
       out_type<Date>& result,
       const arg_type<Timestamp>& timestamp) {
-    bool nullOutput;
-    result = timestampToDate(timestamp, nullOutput);
+    result = timestampToDate(timestamp);
   }
 
   FOLLY_ALWAYS_INLINE void call(
       out_type<Date>& result,
       const arg_type<TimestampWithTimezone>& timestampWithTimezone) {
-    bool nullOutput;
-    result =
-        timestampToDate(this->toTimestamp(timestampWithTimezone), nullOutput);
+    result = timestampToDate(this->toTimestamp(timestampWithTimezone));
   }
 };
 
@@ -304,6 +330,34 @@ struct DayFunction : public InitSessionTimezone<T>,
   }
 };
 
+template <typename T>
+struct LastDayOfMonthFunction : public InitSessionTimezone<T>,
+                                public TimestampWithTimezoneSupport<T> {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Date>& result,
+      const arg_type<Timestamp>& timestamp) {
+    auto dt = getDateTime(timestamp, this->timeZone_);
+    result = util::lastDayOfMonthSinceEpochFromDate(dt);
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Date>& result,
+      const arg_type<Date>& date) {
+    auto dt = getDateTime(date);
+    result = util::lastDayOfMonthSinceEpochFromDate(dt);
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Date>& result,
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone) {
+    auto timestamp = this->toTimestamp(timestampWithTimezone);
+    auto dt = getDateTime(timestamp, nullptr);
+    result = util::lastDayOfMonthSinceEpochFromDate(dt);
+  }
+};
+
 namespace {
 
 bool isIntervalWholeDays(int64_t milliseconds) {
@@ -347,7 +401,7 @@ struct DatePlusIntervalDayTime {
 };
 
 template <typename T>
-struct TimestampMinusIntervalDayTime {
+struct TimestampMinusFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
 
   FOLLY_ALWAYS_INLINE void call(
@@ -355,6 +409,60 @@ struct TimestampMinusIntervalDayTime {
       const arg_type<Timestamp>& a,
       const arg_type<Timestamp>& b) {
     result = a.toMillis() - b.toMillis();
+  }
+};
+
+template <typename T>
+struct TimestampPlusIntervalDayTime {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Timestamp>& result,
+      const arg_type<Timestamp>& a,
+      const arg_type<IntervalDayTime>& b)
+#if defined(__has_feature)
+#if __has_feature(__address_sanitizer__)
+      __attribute__((__no_sanitize__("signed-integer-overflow")))
+#endif
+#endif
+  {
+    result = Timestamp::fromMillisNoError(a.toMillis() + b);
+  }
+};
+
+template <typename T>
+struct IntervalDayTimePlusTimestamp {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Timestamp>& result,
+      const arg_type<IntervalDayTime>& a,
+      const arg_type<Timestamp>& b)
+#if defined(__has_feature)
+#if __has_feature(__address_sanitizer__)
+      __attribute__((__no_sanitize__("signed-integer-overflow")))
+#endif
+#endif
+  {
+    result = Timestamp::fromMillisNoError(a + b.toMillis());
+  }
+};
+
+template <typename T>
+struct TimestampMinusIntervalDayTime {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Timestamp>& result,
+      const arg_type<Timestamp>& a,
+      const arg_type<IntervalDayTime>& b)
+#if defined(__has_feature)
+#if __has_feature(__address_sanitizer__)
+      __attribute__((__no_sanitize__("signed-integer-overflow")))
+#endif
+#endif
+  {
+    result = Timestamp::fromMillisNoError(a.toMillis() - b);
   }
 };
 
@@ -558,6 +666,7 @@ inline std::optional<DateTimeUnit> fromDateTimeUnitString(
   static const StringView kMinute("minute");
   static const StringView kHour("hour");
   static const StringView kDay("day");
+  static const StringView kWeek("week");
   static const StringView kMonth("month");
   static const StringView kQuarter("quarter");
   static const StringView kYear("year");
@@ -579,6 +688,9 @@ inline std::optional<DateTimeUnit> fromDateTimeUnitString(
   if (unit == kDay) {
     return DateTimeUnit::kDay;
   }
+  if (unit == kWeek) {
+    return DateTimeUnit::kWeek;
+  }
   if (unit == kMonth) {
     return DateTimeUnit::kMonth;
   }
@@ -588,7 +700,6 @@ inline std::optional<DateTimeUnit> fromDateTimeUnitString(
   if (unit == kYear) {
     return DateTimeUnit::kYear;
   }
-  // TODO Add support for "week".
   if (throwIfInvalid) {
     VELOX_UNSUPPORTED("Unsupported datetime unit: {}", unitString);
   }
@@ -602,7 +713,8 @@ inline bool isTimeUnit(const DateTimeUnit unit) {
 
 inline bool isDateUnit(const DateTimeUnit unit) {
   return unit == DateTimeUnit::kDay || unit == DateTimeUnit::kMonth ||
-      unit == DateTimeUnit::kQuarter || unit == DateTimeUnit::kYear;
+      unit == DateTimeUnit::kQuarter || unit == DateTimeUnit::kYear ||
+      unit == DateTimeUnit::kWeek;
 }
 
 inline std::optional<DateTimeUnit> getDateUnit(
@@ -682,7 +794,47 @@ struct DateTruncFunction : public TimestampWithTimezoneSupport<T> {
         FMT_FALLTHROUGH;
       case DateTimeUnit::kMonth:
         dateTime.tm_mday = 1;
-        FMT_FALLTHROUGH;
+        dateTime.tm_hour = 0;
+        dateTime.tm_min = 0;
+        dateTime.tm_sec = 0;
+        break;
+      case DateTimeUnit::kWeek:
+        // Subtract the truncation
+        dateTime.tm_mday -= dateTime.tm_wday == 0 ? 6 : dateTime.tm_wday - 1;
+        // Setting the day of the week to Monday
+        dateTime.tm_wday = 1;
+
+        // If the adjusted day of the month falls in the previous month
+        // Move to the previous month
+        if (dateTime.tm_mday < 1) {
+          dateTime.tm_mon -= 1;
+
+          // If the adjusted month falls in the previous year
+          // Set to December and Move to the previous year
+          if (dateTime.tm_mon < 0) {
+            dateTime.tm_mon = 11;
+            dateTime.tm_year -= 1;
+          }
+
+          // Calculate the correct day of the month based on the number of days
+          // in the adjusted month
+          static const int daysInMonth[] = {
+              31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+          int daysInPrevMonth = daysInMonth[dateTime.tm_mon];
+
+          // Adjust for leap year if February
+          if (dateTime.tm_mon == 1 && (dateTime.tm_year + 1900) % 4 == 0 &&
+              ((dateTime.tm_year + 1900) % 100 != 0 ||
+               (dateTime.tm_year + 1900) % 400 == 0)) {
+            daysInPrevMonth = 29;
+          }
+          // Set to the correct day in the previous month
+          dateTime.tm_mday += daysInPrevMonth;
+        }
+        dateTime.tm_hour = 0;
+        dateTime.tm_min = 0;
+        dateTime.tm_sec = 0;
+        break;
       case DateTimeUnit::kDay:
         dateTime.tm_hour = 0;
         FMT_FALLTHROUGH;
@@ -918,7 +1070,7 @@ struct DateDiffFunction : public TimestampWithTimezoneSupport<T> {
     }
   }
 
-  FOLLY_ALWAYS_INLINE bool call(
+  FOLLY_ALWAYS_INLINE void call(
       int64_t& result,
       const arg_type<Varchar>& unitString,
       const arg_type<Timestamp>& timestamp1,
@@ -947,10 +1099,9 @@ struct DateDiffFunction : public TimestampWithTimezoneSupport<T> {
     } else {
       result = diffTimestamp(unit, timestamp1, timestamp2);
     }
-    return true;
   }
 
-  FOLLY_ALWAYS_INLINE bool call(
+  FOLLY_ALWAYS_INLINE void call(
       int64_t& result,
       const arg_type<Varchar>& unitString,
       const arg_type<Date>& date1,
@@ -960,15 +1111,14 @@ struct DateDiffFunction : public TimestampWithTimezoneSupport<T> {
         : getDateUnit(unitString, true).value();
 
     result = diffDate(unit, date1, date2);
-    return true;
   }
 
-  FOLLY_ALWAYS_INLINE bool call(
+  FOLLY_ALWAYS_INLINE void call(
       int64_t& result,
       const arg_type<Varchar>& unitString,
       const arg_type<TimestampWithTimezone>& timestamp1,
       const arg_type<TimestampWithTimezone>& timestamp2) {
-    return call(
+    call(
         result,
         unitString,
         this->toTimestamp(timestamp1),
@@ -1099,16 +1249,43 @@ struct FormatDateTimeFunction {
     }
   }
 
-  FOLLY_ALWAYS_INLINE bool call(
-      out_type<Varchar>& result,
-      const arg_type<Timestamp>& timestamp,
+  FOLLY_ALWAYS_INLINE void ensureFormatter(
       const arg_type<Varchar>& formatString) {
     if (!isConstFormat_) {
       jodaDateTime_ = buildJodaDateTimeFormatter(
           std::string_view(formatString.data(), formatString.size()));
     }
+  }
 
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Varchar>& result,
+      const arg_type<Timestamp>& timestamp,
+      const arg_type<Varchar>& formatString) {
+    ensureFormatter(formatString);
+
+    // TODO: We should give dateTimeFormatter a sink/ostream to prevent the
+    // copy.
     auto formattedResult = jodaDateTime_->format(timestamp, sessionTimeZone_);
+    auto resultSize = formattedResult.size();
+    result.resize(resultSize);
+    if (resultSize != 0) {
+      std::memcpy(result.data(), formattedResult.data(), resultSize);
+    }
+    return true;
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Varchar>& result,
+      const arg_type<TimestampWithTimezone>& timestampWithTimezone,
+      const arg_type<Varchar>& formatString) {
+    ensureFormatter(formatString);
+
+    const auto milliseconds = *timestampWithTimezone.template at<0>();
+    Timestamp timestamp = Timestamp::fromMillis(milliseconds);
+    int16_t timeZoneId = *timestampWithTimezone.template at<1>();
+    auto* timezonePtr = date::locate_zone(util::getTimeZoneName(timeZoneId));
+
+    auto formattedResult = jodaDateTime_->format(timestamp, timezonePtr);
     auto resultSize = formattedResult.size();
     result.resize(resultSize);
     if (resultSize != 0) {

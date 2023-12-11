@@ -81,9 +81,7 @@ struct ApproxMostFrequentAggregate : exec::Aggregate {
   }
 
   void destroy(folly::Range<char**> groups) override {
-    for (auto group : groups) {
-      std::destroy_at(value<Accumulator<T>>(group));
-    }
+    destroyAccumulators<Accumulator<T>>(groups);
   }
 
   void addRawInput(
@@ -351,8 +349,9 @@ std::unique_ptr<exec::Aggregate> makeApproxMostFrequentAggregate(
   }
 }
 
-exec::AggregateRegistrationResult registerApproxMostFrequent(
-    const std::string& name) {
+} // namespace
+
+void registerApproxMostFrequentAggregate(const std::string& prefix) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
   for (const auto& valueType :
        {"tinyint", "smallint", "integer", "bigint", "varchar"}) {
@@ -366,7 +365,8 @@ exec::AggregateRegistrationResult registerApproxMostFrequent(
             .argumentType("bigint")
             .build());
   }
-  return exec::registerAggregateFunction(
+  auto name = prefix + kApproxMostFrequent;
+  exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [name](
@@ -385,12 +385,6 @@ exec::AggregateRegistrationResult registerApproxMostFrequent(
             name,
             valueType);
       });
-}
-
-} // namespace
-
-void registerApproxMostFrequentAggregate(const std::string& prefix) {
-  registerApproxMostFrequent(prefix + kApproxMostFrequent);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

@@ -20,6 +20,7 @@
 #include "velox/exec/CallbackSink.h"
 #include "velox/exec/EnforceSingleRow.h"
 #include "velox/exec/Exchange.h"
+#include "velox/exec/Expand.h"
 #include "velox/exec/FilterProject.h"
 #include "velox/exec/GroupId.h"
 #include "velox/exec/HashAggregation.h"
@@ -38,6 +39,7 @@
 #include "velox/exec/TableScan.h"
 #include "velox/exec/TableWriteMerge.h"
 #include "velox/exec/TableWriter.h"
+#include "velox/exec/Task.h"
 #include "velox/exec/TopN.h"
 #include "velox/exec/TopNRowNumber.h"
 #include "velox/exec/Unnest.h"
@@ -261,6 +263,11 @@ void LocalPlanner::plan(
     std::vector<std::unique_ptr<DriverFactory>>* driverFactories,
     const core::QueryConfig& queryConfig,
     uint32_t maxDrivers) {
+  for (auto& adapter : DriverFactory::adapters) {
+    if (adapter.inspect) {
+      adapter.inspect(planFragment);
+    }
+  }
   detail::plan(
       planFragment.planNode,
       nullptr,
@@ -375,6 +382,23 @@ void LocalPlanner::markMixedJoinBridges(
   }
 }
 
+namespace {
+
+// If the upstream is partial limit, downstream is final limit and we want to
+// flush as soon as we can to reach the limit and do as little work as possible.
+bool eagerFlush(const core::PlanNode& node) {
+  if (auto* limit = dynamic_cast<const core::LimitNode*>(&node)) {
+    return limit->isPartial() && limit->offset() + limit->count() < 10'000;
+  }
+  if (node.sources().empty()) {
+    return false;
+  }
+  // Follow the first source, which is driving the output.
+  return eagerFlush(*node.sources()[0]);
+}
+
+} // namespace
+
 std::shared_ptr<Driver> DriverFactory::createDriver(
     std::unique_ptr<DriverCtx> ctx,
     std::shared_ptr<ExchangeClient> exchangeClient,
@@ -451,7 +475,7 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
             std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
                 planNode)) {
       operators.push_back(std::make_unique<PartitionedOutput>(
-          id, ctx.get(), partitionedOutputNode));
+          id, ctx.get(), partitionedOutputNode, eagerFlush(*planNode)));
     } else if (
         auto joinNode =
             std::dynamic_pointer_cast<const core::HashJoinNode>(planNode)) {
@@ -465,15 +489,17 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
     } else if (
         auto aggregationNode =
             std::dynamic_pointer_cast<const core::AggregationNode>(planNode)) {
-      if (!aggregationNode->preGroupedKeys().empty() &&
-          aggregationNode->preGroupedKeys().size() ==
-              aggregationNode->groupingKeys().size()) {
+      if (aggregationNode->isPreGrouped()) {
         operators.push_back(std::make_unique<StreamingAggregation>(
             id, ctx.get(), aggregationNode));
       } else {
         operators.push_back(
             std::make_unique<HashAggregation>(id, ctx.get(), aggregationNode));
       }
+    } else if (
+        auto expandNode =
+            std::dynamic_pointer_cast<const core::ExpandNode>(planNode)) {
+      operators.push_back(std::make_unique<Expand>(id, ctx.get(), expandNode));
     } else if (
         auto groupIdNode =
             std::dynamic_pointer_cast<const core::GroupIdNode>(planNode)) {
@@ -574,7 +600,46 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
   }
 
   driver->init(std::move(ctx), std::move(operators));
+  for (auto& adapter : adapters) {
+    if (adapter.adapt(*this, *driver)) {
+      break;
+    }
+  }
+  driver->isAdaptable_ = false;
   return driver;
+}
+
+std::vector<std::unique_ptr<Operator>> DriverFactory::replaceOperators(
+    Driver& driver,
+    int32_t begin,
+    int32_t end,
+    std::vector<std::unique_ptr<Operator>> replaceWith) const {
+  VELOX_CHECK(driver.isAdaptable_);
+  std::vector<std::unique_ptr<exec::Operator>> replaced;
+  for (auto i = begin; i < end; ++i) {
+    replaced.push_back(std::move(driver.operators_[i]));
+  }
+
+  driver.operators_.erase(
+      driver.operators_.begin() + begin, driver.operators_.begin() + end);
+
+  // Insert the replacement at the place of the erase. Do manually because
+  // insert() is not good with unique pointers.
+  driver.operators_.resize(driver.operators_.size() + replaceWith.size());
+  for (int32_t i = driver.operators_.size() - 1;
+       i >= begin + replaceWith.size();
+       --i) {
+    driver.operators_[i] = std::move(driver.operators_[i - replaceWith.size()]);
+  }
+  for (auto i = 0; i < replaceWith.size(); ++i) {
+    driver.operators_[i + begin] = std::move(replaceWith[i]);
+  }
+
+  // Set the ids to be consecutive.
+  for (auto i = 0; i < driver.operators_.size(); ++i) {
+    driver.operators_[i]->setOperatorIdFromAdapter(i);
+  }
+  return replaced;
 }
 
 std::vector<core::PlanNodeId> DriverFactory::needsHashJoinBridges() const {
@@ -623,5 +688,13 @@ std::vector<core::PlanNodeId> DriverFactory::needsNestedLoopJoinBridges()
 
   return planNodeIds;
 }
+
+// static
+void DriverFactory::registerAdapter(DriverAdapter adapter) {
+  adapters.push_back(std::move(adapter));
+}
+
+// static
+std::vector<DriverAdapter> DriverFactory::adapters;
 
 } // namespace facebook::velox::exec

@@ -175,6 +175,15 @@ DEFINE_int32(
     512 << 10,
     "Maximum distance in bytes in which coalesce will combine requests");
 
+DEFINE_int32(
+    parquet_prefetch_rowgroups,
+    1,
+    "Number of next row groups to "
+    "prefetch. 1 means prefetch the next row group before decoding "
+    "the current one");
+
+DEFINE_int32(split_preload_per_driver, 2, "Prefetch split metadata");
+
 struct RunStats {
   std::map<std::string, std::string> flags;
   int64_t micros{0};
@@ -263,7 +272,7 @@ class TpchBenchmark {
   }
 
   void shutdown() {
-    cache_->prepareShutdown();
+    cache_->shutdown();
   }
 
   std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>> run(
@@ -274,6 +283,8 @@ class TpchBenchmark {
         CursorParameters params;
         params.maxDrivers = FLAGS_num_drivers;
         params.planNode = tpchPlan.plan;
+        params.queryConfigs[core::QueryConfig::kMaxSplitPreloadPerDriver] =
+            std::to_string(FLAGS_split_preload_per_driver);
         const int numSplitsPerFile = FLAGS_num_splits_per_file;
 
         bool noMoreSplits = false;
