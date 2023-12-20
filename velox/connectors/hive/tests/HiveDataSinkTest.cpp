@@ -61,6 +61,14 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
         std::thread::hardware_concurrency());
   }
 
+  void TearDown() override {
+    connectorQueryCtx_.reset();
+    connectorPool_.reset();
+    opPool_.reset();
+    root_.reset();
+    HiveConnectorTestBase::TearDown();
+  }
+
   std::vector<RowVectorPtr> createVectors(int vectorSize, int numVectors) {
     VectorFuzzer::Options options;
     options.vectorSize = vectorSize;
@@ -87,6 +95,7 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
         0,
         0,
         0,
+        0,
         writerFlushThreshold,
         0,
         "none");
@@ -98,7 +107,7 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
     opPool_.reset();
     root_.reset();
 
-    root_ = memory::defaultMemoryManager().addRootPool(
+    root_ = memory::memoryManager()->addRootPool(
         "HiveDataSinkTest", 1L << 30, exec::MemoryReclaimer::create());
     opPool_ = root_->addLeafChild("operator");
     connectorPool_ =
@@ -183,7 +192,7 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
   }
 
   const std::shared_ptr<memory::MemoryPool> pool_ =
-      memory::addDefaultLeafMemoryPool();
+      memory::memoryManager()->addLeafPool();
 
   std::shared_ptr<memory::MemoryPool> root_;
   std::shared_ptr<memory::MemoryPool> opPool_;

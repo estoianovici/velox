@@ -80,11 +80,20 @@ class TestReaderP
     : public testing::TestWithParam</* parallel decoding = */ bool>,
       public VectorTestBase {
  protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   folly::Executor* executor() {
     if (GetParam() && !executor_) {
-      std::make_shared<folly::CPUThreadPoolExecutor>(2);
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          getDecodingParallelismFactor());
     }
     return executor_.get();
+  }
+
+  size_t getDecodingParallelismFactor() {
+    return GetParam() ? 2 : 0;
   }
 
  private:
@@ -93,6 +102,10 @@ class TestReaderP
 
 class TestReader : public testing::Test, public VectorTestBase {
  protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   std::vector<VectorPtr> createBatches(
       const std::vector<std::vector<int32_t>>& values) {
     std::vector<VectorPtr> batches;
@@ -105,9 +118,19 @@ class TestReader : public testing::Test, public VectorTestBase {
   }
 };
 
-class TestRowReaderPrefetch : public testing::Test, public VectorTestBase {};
+class TestRowReaderPrefetch : public testing::Test, public VectorTestBase {
+ protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+};
 
-class TestRowReaderPfetch : public testing::Test, public VectorTestBase {};
+class TestRowReaderPfetch : public testing::Test, public VectorTestBase {
+ protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+};
 
 } // namespace
 
@@ -387,7 +410,12 @@ void verifyCachedIndexStreamReads(
   }
 }
 
-class TestFlatMapReader : public TestWithParam<bool>, public VectorTestBase {};
+class TestFlatMapReader : public TestWithParam<bool>, public VectorTestBase {
+ protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+};
 
 TEST_P(TestFlatMapReader, testReadFlatMapEmptyMap) {
   const std::string emptyFile(getExampleFilePath("empty_flatmap.orc"));
@@ -775,7 +803,12 @@ struct ByStripeInfo {
 };
 
 class TestRowReaderPrefetchByStripe : public TestWithParam<ByStripeInfo>,
-                                      public VectorTestBase {};
+                                      public VectorTestBase {
+ protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+};
 
 // This test ensures that we only return the prefetch units for the stripes that
 // we'll actually use, according to the range passed to the row reader. We
@@ -905,7 +938,12 @@ TEST_F(TestRowReaderPrefetch, testEmptyRowRange) {
 
 class TestFlatMapReaderFlatLayout
     : public TestWithParam<std::tuple<bool, size_t>>,
-      public VectorTestBase {};
+      public VectorTestBase {
+ protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+};
 
 TEST_P(TestFlatMapReaderFlatLayout, testCompare) {
   dwio::common::ReaderOptions readerOptions{pool()};
@@ -1818,7 +1856,8 @@ TEST_P(TestReaderP, testUpcastBoolean) {
       TypeWithId::create(rowType),
       streams,
       labels,
-      executor());
+      executor(),
+      getDecodingParallelismFactor());
 
   VectorPtr batch;
   reader->next(104, batch);
@@ -1868,7 +1907,8 @@ TEST_P(TestReaderP, testUpcastIntDirect) {
       TypeWithId::create(rowType),
       streams,
       labels,
-      executor());
+      executor(),
+      getDecodingParallelismFactor());
 
   VectorPtr batch;
   reader->next(100, batch);
@@ -1935,7 +1975,8 @@ TEST_P(TestReaderP, testUpcastIntDict) {
       TypeWithId::create(rowType),
       streams,
       labels,
-      executor());
+      executor(),
+      getDecodingParallelismFactor());
 
   VectorPtr batch;
   reader->next(100, batch);
@@ -1990,7 +2031,8 @@ TEST_P(TestReaderP, testUpcastFloat) {
       TypeWithId::create(rowType),
       streams,
       labels,
-      executor());
+      executor(),
+      getDecodingParallelismFactor());
 
   VectorPtr batch;
   reader->next(100, batch);

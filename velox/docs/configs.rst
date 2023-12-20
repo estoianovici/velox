@@ -94,7 +94,14 @@ Generic Configuration
    * - max_page_partitioning_buffer_size
      - integer
      - 32MB
-     - The target size for a Task's buffered output. The producer Drivers are blocked when the buffered size exceeds this.
+     - The maximum size in bytes for the task's buffered output when output is partitioned using hash of partitioning keys. See PartitionedOutputNode::Kind::kPartitioned.
+       The producer Drivers are blocked when the buffered size exceeds this.
+       The Drivers are resumed when the buffered size goes below OutputBufferManager::kContinuePct (90)% of this.
+   * - max_arbitrary_buffer_size
+     - integer
+     - 32MB
+     - The maximum size in bytes for the task's buffered output when output is distributed randomly among consumers. See PartitionedOutputNode::Kind::kArbitrary.
+       The producer Drivers are blocked when the buffered size exceeds this.
        The Drivers are resumed when the buffered size goes below OutputBufferManager::kContinuePct (90)% of this.
    * - min_table_rows_for_parallel_join_build
      - integer
@@ -111,6 +118,11 @@ Generic Configuration
      - true
      - Whether to enable caches in expression evaluation. If set to true, optimizations including vector pools and
        evalWithMemo are enabled.
+   * - driver_cpu_time_slice_limit_ms
+     - integer
+     - 0
+     - If it is not zero, specifies the time limit that a driver can continuously
+       run on a thread before yield. If it is zero, then it no limit.
 
 .. _expression-evaluation-conf:
 
@@ -271,6 +283,16 @@ Spilling
        spilling which might use recursive spilling when the build table is very large. -1 means unlimited.
        In this case an extremely large query might run out of spilling partition bits. The max spill level
        can be used to prevent a query from using too much io and cpu resources.
+   * - max_spill_run_rows
+     - integer
+     - 12582912
+     - The max number of rows to fill and spill for each spill run. This is used to cap the memory used for spilling.
+       If it is zero, then there is no limit and spilling might run out of memory. Based on offline test results, the
+       default value is set to 12 million rows which uses ~128MB memory when to fill a spill run.
+       Relation between spill rows and memory usage are as follows:
+         * ``12 million rows: 128 MB``
+         * ``30 million rows: 256 MB``
+         * ``60 million rows: 512 MB``
    * - max_spill_file_size
      - integer
      - 0
@@ -385,7 +407,7 @@ Each query can override the config by setting corresponding query session proper
      - 100
      - Maximum number of (bucketed) partitions per a single table writer instance.
    * - insert-existing-partitions-behavior
-     -
+     - insert_existing_partitions_behavior
      - string
      - ERROR
      - **Allowed values:** ``OVERWRITE``, ``ERROR``. The behavior on insert existing partitions. This property only derives
@@ -407,7 +429,7 @@ Each query can override the config by setting corresponding query session proper
    * - max-coalesced-bytes
      -
      - integer
-     - 512KB
+     - 512kB
      - Maximum size in bytes to coalesce requests to be fetched in a single request.
    * - max-coalesced-distance-bytes
      -

@@ -23,21 +23,22 @@ on:
     - cron: '0 3 * * *'
 
   workflow_dispatch:
-    ref:
-      description: 'Ref to checkout out'
-      default: 'main'
-    numThreads:
-      description: 'Number of threads'
-      default: 16
-    maxHighMemJobs:
-      description: 'Number of high memory jobs'
-      default: 8
-    maxLinkJobs:
-      description: 'Maximum number of link jobs'
-      default: 4
-    extraCMakeFlags:
-      description: 'Additional CMake flags'
-      default: ''
+    inputs:
+      ref:
+        description: 'Ref to checkout out'
+        default: 'main'
+      numThreads:
+        description: 'Number of threads'
+        default: 16
+      maxHighMemJobs:
+        description: 'Number of high memory jobs'
+        default: 8
+      maxLinkJobs:
+        description: 'Maximum number of link jobs'
+        default: 4
+      extraCMakeFlags:
+        description: 'Additional CMake flags'
+        default: ''
 
 defaults:
   run:
@@ -94,13 +95,13 @@ jobs:
           name: spark
           path: |
             velox/_build/debug/velox/expression/tests/spark_expression_fuzzer_test
-            velox/_build/debug/velox/expression/tests/spark_aggregation_fuzzer_test
+            velox/_build/debug/velox/functions/sparksql/fuzzer/spark_aggregation_fuzzer_test
 
       - name: Upload aggregation fuzzer
         uses: actions/upload-artifact@v3
         with:
           name: aggregation
-          path: velox/_build/debug/velox/exec/tests/velox_aggregation_fuzzer_test
+          path: velox/_build/debug/velox/functions/prestosql/fuzzer/velox_aggregation_fuzzer_test
 
       - name: Upload join fuzzer
         uses: actions/upload-artifact@v3
